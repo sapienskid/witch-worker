@@ -1,0 +1,15 @@
+name = "witch-worker"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+workers_dev = true
+
+# R2 bucket used as the content store. Content is stored under the `content/`
+# prefix; the CMS plugin keeps images under `images/` in the same (or another)
+# bucket. Point this at the bucket you created, or rename it.
+[[r2_buckets]]
+binding = "SITE_CONTENT"
+bucket_name = "witch-worker"
+
+# Periodic rebuild so scheduled posts publish automatically.
+[triggers]
+crons = ["*/15 * * * *"]
