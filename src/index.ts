@@ -18,6 +18,8 @@ export interface Env {
 }
 
 const CONTENT_PREFIX = 'content/';
+const IMAGES_PREFIX = 'images/';
+const BUILD_META_KEY = 'meta/build.json';
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -47,8 +49,21 @@ export default {
       }
     }
 
+    if (path === '/api/images' && request.method === 'GET') {
+      return getImages(env);
+    }
+
+    const imageMatch = path.match(/^\/api\/images\/(.+)$/);
+    if (imageMatch && request.method === 'DELETE') {
+      return deleteImage(env, IMAGES_PREFIX + safeDecode(imageMatch[1]));
+    }
+
     if (path === '/api/build' && request.method === 'POST') {
       return triggerBuild(env);
+    }
+
+    if (path === '/api/status' && request.method === 'GET') {
+      return getBuildStatus(env);
     }
 
     return new Response('Not found', { status: 404 });
@@ -110,15 +125,65 @@ async function deleteContent(env: Env, key: string): Promise<Response> {
   return json({ ok: true });
 }
 
+async function getImages(env: Env): Promise<Response> {
+  const images: Array<{ key: string; size: number; uploaded: string }> = [];
+  let cursor: string | undefined;
+  do {
+    const listed = await env.SITE_CONTENT.list({ prefix: IMAGES_PREFIX, cursor });
+    for (const obj of listed.objects) {
+      images.push({
+        key: obj.key.slice(IMAGES_PREFIX.length),
+        size: obj.size,
+        uploaded: obj.uploaded.toISOString(),
+      });
+    }
+    cursor = listed.truncated ? listed.cursor : undefined;
+  } while (cursor);
+  return json({ images });
+}
+
+async function deleteImage(env: Env, key: string): Promise<Response> {
+  await env.SITE_CONTENT.delete(key);
+  return json({ ok: true });
+}
+
 async function triggerBuild(env: Env): Promise<Response> {
   if (!env.BUILD_HOOK_URL) {
+    await recordBuildMeta(env, 'error', 'BUILD_HOOK_URL not configured');
     return json({ ok: false, error: 'BUILD_HOOK_URL not configured' }, 500);
   }
   const res = await fetch(env.BUILD_HOOK_URL, { method: 'POST' });
   if (!res.ok) {
+    await recordBuildMeta(env, 'error', `hook HTTP ${res.status}`);
     return json({ ok: false, status: res.status }, 502);
   }
+  await recordBuildMeta(env, 'ok');
   return json({ ok: true });
+}
+
+async function recordBuildMeta(env: Env, status: 'ok' | 'error', detail?: string): Promise<void> {
+  const meta = { lastBuildAt: new Date().toISOString(), lastBuildStatus: status, detail: detail ?? '' };
+  await env.SITE_CONTENT.put(BUILD_META_KEY, JSON.stringify(meta), {
+    httpMetadata: { contentType: 'application/json; charset=utf-8' },
+  });
+}
+
+async function getBuildStatus(env: Env): Promise<Response> {
+  const obj = await env.SITE_CONTENT.get(BUILD_META_KEY);
+  if (!obj) {
+    return json({ lastBuildAt: null, lastBuildStatus: null });
+  }
+  const text = await obj.text();
+  try {
+    const parsed = JSON.parse(text) as { lastBuildAt?: string; lastBuildStatus?: string; detail?: string };
+    return json({
+      lastBuildAt: parsed.lastBuildAt ?? null,
+      lastBuildStatus: parsed.lastBuildStatus ?? null,
+      detail: parsed.detail ?? '',
+    });
+  } catch {
+    return json({ lastBuildAt: null, lastBuildStatus: null });
+  }
 }
 
 function contentTypeFor(key: string): string {

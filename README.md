@@ -48,7 +48,10 @@ Auth: every route requires `Authorization: Bearer <CONTENT_API_TOKEN>`
 | GET | `/api/content/:key` | Fetch a file | — |
 | PUT | `/api/content/:key` | Upsert a file | raw bytes |
 | DELETE | `/api/content/:key` | Delete a file | — |
+| GET | `/api/images` | List media under `images/` | — |
+| DELETE | `/api/images/:key` | Delete an image | — |
 | POST | `/api/build` | Trigger the Pages build hook | — |
+| GET | `/api/status` | Last build time + status | — |
 
 ## Key layout
 
@@ -60,8 +63,10 @@ content/blog/<slug>.md          # posts (section = a tag like #blog/#portfolio)
 content/<slug>/_index.md        # static pages (about, contact, privacy, terms)
 content/tags/<slug>.md          # tag archive pages (written by the CMS)
 site.json                       # site-wide settings (optionally merged into config)
-tags.json                       # tag registry (reference; not consumed by the build)
 ```
+
+Tag metadata lives in the vault as `Site/tags/<slug>.md` notes (managed by the
+CMS); only the generated `content/tags/<slug>.md` archives are uploaded.
 
 ## Using it with any Hugo site
 
@@ -125,10 +130,13 @@ Site-wide settings merged into your config (identity, social, homepage text,
 SEO defaults, nav). Shape is up to your theme — see
 [`numrecall`](https://github.com/sapienskid/numrecall) for a reference.
 
+`/api/build` and the cron record the last build result to `meta/build.json`;
+`GET /api/status` reports it back so the CMS can show "last build · ok/failed".
+
 ### tags.json
 
-Registry managed by the CMS: `{ "<slug>": { name, slug, description, color,
-feature_image, parent, visibility, meta_title, meta_description } }`.
+> No longer emitted. Tag metadata is authored in the vault as `Site/tags/<slug>.md`
+> notes; the build only consumes the generated `content/tags/<slug>.md` archives.
 
 ## Repository layout
 

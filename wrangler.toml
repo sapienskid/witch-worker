@@ -12,4 +12,4 @@ bucket_name = "witch-worker"
 
 # Periodic rebuild so scheduled posts publish automatically.
 [triggers]
-crons = ["*/15 * * * *"]
+crons = ["*/5 * * * *"]
