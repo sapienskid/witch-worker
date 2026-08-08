@@ -70,13 +70,73 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    // Periodic rebuild so scheduled posts (published_at in the future)
-    // go live automatically once their date passes.
-    if (env.BUILD_HOOK_URL) {
+    // Rebuild so scheduled posts (published_at in the future) go live once their
+    // date passes. Only rebuild when there is actually something due: a pending
+    // schedule, or content published since the last build.
+    if (await shouldRebuild(env)) {
       ctx.waitUntil(triggerBuild(env));
     }
   },
 };
+
+async function shouldRebuild(env: Env): Promise<boolean> {
+  let lastBuildAt = 0;
+  const meta = await env.SITE_CONTENT.get(BUILD_META_KEY);
+  if (meta) {
+    try {
+      const parsed = JSON.parse(await meta.text()) as { lastBuildAt?: string };
+      const time = parsed.lastBuildAt ? new Date(parsed.lastBuildAt).getTime() : 0;
+      if (!Number.isNaN(time)) {
+        lastBuildAt = time;
+      }
+    } catch {
+      // ignore unreadable build meta
+    }
+  }
+
+  const now = Date.now();
+  let pending = false;
+  let dueSinceLastBuild = false;
+
+  const keys: string[] = [];
+  let cursor: string | undefined;
+  do {
+    const listed = await env.SITE_CONTENT.list({ prefix: CONTENT_PREFIX, cursor });
+    for (const obj of listed.objects) {
+      keys.push(obj.key);
+    }
+    cursor = listed.truncated ? listed.cursor : undefined;
+  } while (cursor);
+
+  for (const key of keys) {
+    if (!key.endsWith('.md')) {
+      continue;
+    }
+    const obj = await env.SITE_CONTENT.get(key);
+    if (!obj) {
+      continue;
+    }
+    const text = await obj.text();
+    const match = text.match(/published_at:\s*["']?([^"'\n]+)/);
+    if (!match) {
+      continue;
+    }
+    const time = new Date(match[1]).getTime();
+    if (Number.isNaN(time)) {
+      continue;
+    }
+    if (time > now) {
+      pending = true;
+    } else if (time > lastBuildAt) {
+      dueSinceLastBuild = true;
+    }
+    if (pending && dueSinceLastBuild) {
+      break;
+    }
+  }
+
+  return pending || dueSinceLastBuild;
+}
 
 async function isAuthorized(request: Request, env: Env): Promise<boolean> {
   const provided = request.headers.get('Authorization') || '';
