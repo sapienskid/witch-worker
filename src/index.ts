@@ -18,7 +18,6 @@ export interface Env {
 }
 
 const CONTENT_PREFIX = 'content/';
-const IMAGES_PREFIX = 'images/';
 const BUILD_META_KEY = 'meta/build.json';
 
 export default {
@@ -55,7 +54,7 @@ export default {
 
     const imageMatch = path.match(/^\/api\/images\/(.+)$/);
     if (imageMatch && request.method === 'DELETE') {
-      return deleteImage(env, IMAGES_PREFIX + safeDecode(imageMatch[1]));
+      return deleteImage(env, safeDecode(imageMatch[1]));
     }
 
     if (path === '/api/build' && request.method === 'POST') {
@@ -189,10 +188,15 @@ async function getImages(env: Env): Promise<Response> {
   const images: Array<{ key: string; size: number; uploaded: string }> = [];
   let cursor: string | undefined;
   do {
-    const listed = await env.SITE_CONTENT.list({ prefix: IMAGES_PREFIX, cursor });
+    const listed = await env.SITE_CONTENT.list({ cursor });
     for (const obj of listed.objects) {
+      // Show everything except the content store and build metadata, so the
+      // media library surfaces images/, media/ (video/audio), and og/ cards.
+      if (obj.key.startsWith(CONTENT_PREFIX) || obj.key.startsWith('meta/')) {
+        continue;
+      }
       images.push({
-        key: obj.key.slice(IMAGES_PREFIX.length),
+        key: obj.key,
         size: obj.size,
         uploaded: obj.uploaded.toISOString(),
       });
