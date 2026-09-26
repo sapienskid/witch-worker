@@ -3,15 +3,20 @@
 // render it as Hugo content. Drop this into any Hugo repo and wire it into
 // your build:
 //
-//   "build": "node scripts/sync-content.js && hugo --minify"
+//   "build": "node scripts/sync-content.js --config data/config.yaml --anchor portfolio/_index.md && hugo --minify"
 //
 // Usage:
 //   node scripts/sync-content.js
 //   node scripts/sync-content.js --url http://localhost:8787 --token dev-token
 //   node scripts/sync-content.js --content-dir content --config data/config.yaml
+//   node scripts/sync-content.js --anchor portfolio/_index.md
 //   node scripts/sync-content.js --watch
 //
-// Env: CONTENT_API_URL, CONTENT_API_TOKEN
+// Env: CONTENT_API_URL, CONTENT_API_TOKEN, CONTENT_DIR, CONTENT_CONFIG_PATH
+//
+// --anchor ensures a config-driven section page exists even when the CMS
+// never publishes into that section (repeatable). Anchors survive reconcile
+// and are (re)created when the sync is skipped for local preview.
 
 import fs from 'fs';
 import path from 'path';
@@ -30,6 +35,7 @@ function parseArgs(argv) {
     token: process.env.CONTENT_API_TOKEN,
     contentDir: process.env.CONTENT_DIR || 'content',
     config: process.env.CONTENT_CONFIG_PATH || '',
+    anchors: [],
     watch: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -37,6 +43,7 @@ function parseArgs(argv) {
     if (argv[i] === '--token') args.token = argv[i + 1];
     if (argv[i] === '--content-dir') args.contentDir = argv[i + 1];
     if (argv[i] === '--config') args.config = argv[i + 1];
+    if (argv[i] === '--anchor') args.anchors.push(argv[i + 1]);
     if (argv[i] === '--watch') args.watch = true;
   }
   return args;
@@ -45,15 +52,17 @@ function parseArgs(argv) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
+  const contentDir = path.resolve(__dirname, '..', args.contentDir);
+  const configPath = args.config ? path.resolve(__dirname, '..', args.config) : null;
+
   if (!args.url || !args.token) {
     console.warn('⚠️  CONTENT_API_URL/CONTENT_API_TOKEN not set. Skipping content sync.');
+    ensureAnchors(contentDir, args.anchors);
     return;
   }
 
   const base = args.url.replace(/\/$/, '');
   const headers = { Authorization: `Bearer ${args.token}` };
-  const contentDir = path.resolve(__dirname, '..', args.contentDir);
-  const configPath = args.config ? path.resolve(__dirname, '..', args.config) : null;
 
   const syncOnce = async () => {
     try {
@@ -84,10 +93,14 @@ async function main() {
         written++;
       }
 
+      // Remove files under content/ no longer present in the manifest.
+      // Anchors are kept across syncs.
       let removed = 0;
       if (fs.existsSync(contentDir)) {
-        removed = reconcile(contentDir, new Set(mdKeys));
+        removed = reconcile(contentDir, contentDir, new Set([...mdKeys, ...args.anchors]));
       }
+
+      ensureAnchors(contentDir, args.anchors);
 
       if (siteJson != null && configPath) {
         mergeSiteConfig(JSON.parse(siteJson), configPath);
@@ -135,12 +148,14 @@ function applyDraftLogic(raw) {
   return body;
 }
 
-function reconcile(dir, manifestKeys) {
+function reconcile(root, dir, manifestKeys) {
   let removed = 0;
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const rel = path.relative(dir, path.join(dir, entry.name));
+    // Relative to the content root (not the current dir) so nested files
+    // compare correctly against manifest keys like blog/post.md.
+    const rel = path.relative(root, path.join(dir, entry.name));
     if (entry.isDirectory()) {
-      removed += reconcile(path.join(dir, entry.name), manifestKeys);
+      removed += reconcile(root, path.join(dir, entry.name), manifestKeys);
       if (fs.existsSync(path.join(dir, entry.name)) && fs.readdirSync(path.join(dir, entry.name)).length === 0) {
         fs.rmdirSync(path.join(dir, entry.name));
       }
@@ -154,9 +169,36 @@ function reconcile(dir, manifestKeys) {
   return removed;
 }
 
+// Section anchors for pages that are config-driven rather than CMS-driven
+// (e.g. a portfolio grid rendered from site config). content/ is generated,
+// so anchors are (re)created on every sync and skip.
+function ensureAnchors(contentDir, anchors) {
+  for (const anchor of anchors) {
+    const dest = path.join(contentDir, anchor);
+    if (fs.existsSync(dest)) continue;
+    const section = anchor.split('/')[0] || 'section';
+    const title = section.charAt(0).toUpperCase() + section.slice(1);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, `---\ntitle: "${title}"\ndraft: false\n---\n`, 'utf8');
+    console.log(`🪄  Ensured content/${anchor} (config-driven section)`);
+  }
+}
+
+// A CMS value that is blank (empty string, empty array, empty object, null)
+// is treated as "not set": it keeps the committed default rather than
+// overwriting it. This makes site.json non-destructive on partial edits.
+function isEmptyValue(v) {
+  if (v == null) return true;
+  if (typeof v === 'string') return v.trim() === '';
+  if (Array.isArray(v)) return v.length === 0;
+  if (typeof v === 'object') return Object.keys(v).length === 0;
+  return false;
+}
+
 function deepMerge(base, override) {
   const out = { ...base };
   for (const [k, v] of Object.entries(override || {})) {
+    if (isEmptyValue(v)) continue;
     if (v && typeof v === 'object' && !Array.isArray(v) && out[k] && typeof out[k] === 'object' && !Array.isArray(out[k])) {
       out[k] = deepMerge(out[k], v);
     } else {
@@ -174,4 +216,8 @@ function mergeSiteConfig(siteJson, configPath) {
   console.log('🪄  Merged site.json into', configPath);
 }
 
-main();
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main();
+}
+
+export { parseArgs, applyDraftLogic, reconcile, ensureAnchors, isEmptyValue, deepMerge };

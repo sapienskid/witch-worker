@@ -59,22 +59,39 @@ Keys are the **destination path under `content/`** in the Hugo repo, so the
 sync step can mirror them 1:1:
 
 ```
-content/blog/<slug>.md          # posts (section = a tag like #blog/#portfolio)
+content/blog/<slug>.md          # posts — every post lands here; tags never route
 content/<slug>/_index.md        # static pages (about, contact, privacy, terms)
-content/tags/<slug>.md          # tag archive pages (written by the CMS)
-site.json                       # site-wide settings (optionally merged into config)
+site.json                       # legacy site-wide settings (merged into config when present)
 ```
 
-Tag metadata lives in the vault as `Site/tags/<slug>.md` notes (managed by the
-CMS); only the generated `content/tags/<slug>.md` archives are uploaded.
+Legacy keys from the multi-section era (`content/portfolio/*`,
+`content/flashcards/*`, `content/work/*`, `content/tags/*`) are no longer
+written. The CMS deletes them when their notes are unpublished; the
+`reconcile` step in `sync-content.js` drops anything else missing from the
+manifest. Generated share cards live at `og/<slug>.webp` (cleaned from the
+CMS media tab).
+
+## Scheduling
+
+`published_at` in the future keeps a post `draft: true` at sync time. The
+cron (every 5 min) rebuilds only when needed: it tracks the earliest pending
+`published_at` (`nextDueAt` in `meta/build.json`) plus R2 upload timestamps,
+so idle ticks cost one list + one read and zero file reads.
 
 ## Using it with any Hugo site
+
+`scripts/sync-content.js` is the canonical sync script (vendored copies must
+stay identical — diff them before changing either):
 
 1. Copy `scripts/sync-content.js` into your repo's `scripts/`.
 2. In `package.json`:
    ```json
-   "build": "node scripts/sync-content.js && hugo --minify"
+   "build": "node scripts/sync-content.js --config data/config.yaml --anchor portfolio/_index.md && hugo --minify"
    ```
+   `--config` merges `site.json` into a config file your theme reads (blank
+   CMS values never overwrite committed defaults). Repeatable `--anchor`
+   flags guarantee config-driven sections (e.g. a portfolio grid with no CMS
+   pages) always render, including local previews with no credentials.
 3. Set env on the build host (Cloudflare Pages):
    ```
    CONTENT_API_URL=https://witch-worker.<your-subdomain>.workers.dev
@@ -89,6 +106,10 @@ Local preview:
 node scripts/sync-content.js --url http://localhost:8787 --token dev-token
 hugo server -D
 ```
+
+Run `pnpm test` for the worker + sync-script suite (`node --test`, no
+extra dependencies). Note `crypto.subtle.timingSafeEqual` is a
+Workers-only API — tests shim it over `node:crypto`.
 
 ## Data model
 

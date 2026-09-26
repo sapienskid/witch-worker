@@ -78,36 +78,55 @@ export default {
   },
 };
 
-async function shouldRebuild(env: Env): Promise<boolean> {
-  let lastBuildAt = 0;
-  const meta = await env.SITE_CONTENT.get(BUILD_META_KEY);
-  if (meta) {
+export interface BuildMeta {
+  lastBuildAt?: string;
+  lastBuildStatus?: string;
+  detail?: string;
+  /** Earliest future published_at seen during the last scan, or null. */
+  nextDueAt?: string | null;
+}
+
+export async function shouldRebuild(env: Env): Promise<boolean> {
+  let meta: BuildMeta = {};
+  const stored = await env.SITE_CONTENT.get(BUILD_META_KEY);
+  if (stored) {
     try {
-      const parsed = JSON.parse(await meta.text()) as { lastBuildAt?: string };
-      const time = parsed.lastBuildAt ? new Date(parsed.lastBuildAt).getTime() : 0;
-      if (!Number.isNaN(time)) {
-        lastBuildAt = time;
-      }
+      meta = JSON.parse(await stored.text()) as BuildMeta;
     } catch {
-      // ignore unreadable build meta
+      // ignore unreadable build meta and fall through to a full scan
     }
   }
 
   const now = Date.now();
-  let pending = false;
-  let dueSinceLastBuild = false;
+  const lastBuildAt = meta.lastBuildAt ? new Date(meta.lastBuildAt).getTime() : 0;
 
-  const keys: string[] = [];
+  // List content keys (no reads yet) so idle ticks stay cheap.
+  const keys: Array<{ key: string; uploaded: number }> = [];
   let cursor: string | undefined;
   do {
     const listed = await env.SITE_CONTENT.list({ prefix: CONTENT_PREFIX, cursor });
     for (const obj of listed.objects) {
-      keys.push(obj.key);
+      keys.push({ key: obj.key, uploaded: obj.uploaded?.getTime() ?? 0 });
     }
     cursor = listed.truncated ? listed.cursor : undefined;
   } while (cursor);
 
-  for (const key of keys) {
+  // >= (not >): an upload landing in the same millisecond as a build must
+  // still trigger a scan — a redundant scan is harmless, a miss is not.
+  const uploadedSinceBuild = Number.isNaN(lastBuildAt) || keys.some(entry => entry.key.endsWith('.md') && entry.uploaded >= lastBuildAt);
+  // A completed scan (nextDueAt present, even when null) plus no uploads
+  // since the last build means nothing could have changed: skip the reads.
+  // Undefined nextDueAt means no scan ever ran (legacy meta) — scan once.
+  const scanned = meta.nextDueAt !== undefined;
+  const nextDue = meta.nextDueAt ? new Date(meta.nextDueAt).getTime() : NaN;
+  if (scanned && !uploadedSinceBuild && (meta.nextDueAt === null || (!Number.isNaN(nextDue) && now < nextDue))) {
+    return false;
+  }
+
+  let nextDueAt: string | null = null;
+  let dueSinceLastBuild = false;
+
+  for (const { key } of keys) {
     if (!key.endsWith('.md')) {
       continue;
     }
@@ -125,16 +144,19 @@ async function shouldRebuild(env: Env): Promise<boolean> {
       continue;
     }
     if (time > now) {
-      pending = true;
+      if (nextDueAt === null || time < new Date(nextDueAt).getTime()) {
+        nextDueAt = new Date(time).toISOString();
+      }
     } else if (time > lastBuildAt) {
       dueSinceLastBuild = true;
     }
-    if (pending && dueSinceLastBuild) {
+    if (dueSinceLastBuild && nextDueAt !== null) {
       break;
     }
   }
 
-  return pending || dueSinceLastBuild;
+  await recordScanMeta(env, meta, nextDueAt);
+  return dueSinceLastBuild || uploadedSinceBuild;
 }
 
 async function isAuthorized(request: Request, env: Env): Promise<boolean> {
@@ -225,8 +247,28 @@ async function triggerBuild(env: Env): Promise<Response> {
   return json({ ok: true });
 }
 
+async function recordScanMeta(env: Env, meta: BuildMeta, nextDueAt: string | null): Promise<void> {
+  const merged: BuildMeta = { ...meta, nextDueAt };
+  await env.SITE_CONTENT.put(BUILD_META_KEY, JSON.stringify(merged), {
+    httpMetadata: { contentType: 'application/json; charset=utf-8' },
+  });
+}
+
 async function recordBuildMeta(env: Env, status: 'ok' | 'error', detail?: string): Promise<void> {
-  const meta = { lastBuildAt: new Date().toISOString(), lastBuildStatus: status, detail: detail ?? '' };
+  // Preserve the scheduler's nextDueAt across builds.
+  let nextDueAt: string | null | undefined;
+  const stored = await env.SITE_CONTENT.get(BUILD_META_KEY);
+  if (stored) {
+    try {
+      nextDueAt = (JSON.parse(await stored.text()) as BuildMeta).nextDueAt;
+    } catch {
+      // ignore unreadable build meta
+    }
+  }
+  const meta: BuildMeta = { lastBuildAt: new Date().toISOString(), lastBuildStatus: status, detail: detail ?? '' };
+  if (nextDueAt !== undefined) {
+    meta.nextDueAt = nextDueAt;
+  }
   await env.SITE_CONTENT.put(BUILD_META_KEY, JSON.stringify(meta), {
     httpMetadata: { contentType: 'application/json; charset=utf-8' },
   });
